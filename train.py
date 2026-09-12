@@ -1,0 +1,281 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+input = 'hello world'
+
+# === Tokenizaton, creating a vocabulary space === 
+
+# use simple character tokenization to get the vocabulary space
+chars = sorted(list(set(input)))
+
+print('chars: ', chars)
+
+# convert each token to an integer, which is used as id. this is the vocabulary of the model. 
+# the id itself does not store the semantic meaning of the token, we need the embeddings for that. 
+
+stoi = { 
+    ch:i for i, ch in enumerate(chars)
+}
+
+print('stoi: ', stoi)
+
+# to map back to get the output 
+itos = { 
+    i:ch for i, ch in enumerate(chars)
+}
+
+def encode(s):
+    return [stoi[c] for c in s]
+
+def decode(l):
+    return ''.join([itos[i] for i in l])
+
+# test tokenization 
+print('encode: ', encode(input))
+print('decode: ', decode(encode(input)))
+
+# === Token embedding, giving each token a vector representation === 
+
+# Token embedding table, gives each token a vector representation to capture nearby tokens. 
+vocab_size = len(chars)
+
+embedding_dim = 4 # we use 4 to keep it simple, in practice, the dimensions are much larger. 
+
+# we create a vocab_size x embedding_dim matrix, where each row is a vector representation of a token. 
+# these initially start as random values, which will be trained via backpropagation. 
+token_embeddings = nn.Embedding(
+    num_embeddings=vocab_size, 
+    embedding_dim=embedding_dim
+    )
+
+# test embedding table
+print('token_embeddings: ', token_embeddings)
+
+# Get embeddings for all tokens in the input sequence
+token_ids = torch.tensor(encode(input), dtype=torch.long)
+
+# we can get the embedding for a token by passing the token id to the embedding table. 
+input_token_embeddings = token_embeddings(token_ids)
+
+print('input_token_embeddings: ', input_token_embeddings) # prints out the embeddings for each token 
+# eg, h => row 1, e => row 2, l => row 3, l => row 4 etc. 
+# shape: [sequence_num_tokens, embedding_dim]
+
+# Text
+#  ↓
+# Tokenizer
+#  ↓
+# Token IDs
+#  ↓
+# Embedding matrix
+#  ↓
+# X = input_token_embeddings = [embedding_dim, sequence_length]
+
+# Next: 
+# X
+#  ↓
+# Position Embeddings       ← next
+#  ↓
+# Transformer Blocks
+#  ↓
+# LayerNorm
+#  ↓
+# LM Head
+#  ↓
+# Next token
+
+# === Position embedding, the position of the token in the sequence matters, and should be encoded for the transformer to take into account === 
+# the end goal: X = Etoken + Eposition, so we take into account token position in self-attention. 
+
+context_len = 32 # this is our full context window, which is the maximum number of tokens that the model can see at once. 
+
+position_embeddings = nn.Embedding(
+    num_embeddings=context_len,
+    embedding_dim=embedding_dim # same dimension as the token embeddings, so we can add them together. usually same as token embeddings for standard GPT. 
+) # Another random initialized matrix, which will be trained via backpropagation. 
+
+# Modern architectures might use RoPE (Rotary Position Embedding) for position embeddings, which is a more efficient way to encode position information. 
+# This supports longer context windows and is more efficient to compute. 
+
+num_tokens = len(token_ids)
+# basically, we assign each token a position id. 
+position_ids = torch.arange(num_tokens, dtype=torch.long) # generates [0, 1, 2, ..., num_tokens-1]
+
+position_embeddings = position_embeddings(position_ids)
+
+input_embeddings = input_token_embeddings + position_embeddings # =X where each row captures the token meaning + position meaning for each token individually.  
+
+print('input_embeddings: ', input_embeddings)
+
+# using this input, we can now pass it to the transformer blocks with causal self-attention.
+
+# === Transformer block: Causal self attention === 
+# how do we get the model to predict the next token, considering all the tokens in the context window?
+
+# 1 layer of transformer: 
+# X
+# │
+# ├──> Causal Self-Attention
+# │         │
+# │         ▼
+# │    tokens communicate
+# │
+# ├──> Feed-Forward Network
+# │         │
+# │         ▼
+# │    each token processes what it learned
+# │
+# ▼
+# new X
+
+# what is causal self attention for? 
+# this is a river bank 
+# i went to withdraw money from the bank
+# we need to know the context of the word "bank" from the earlier tokens. it needs to ask "which previous tokens are relevant to "bank"? = attention
+# eg, which earlier tokens should i pay the most attention to. 
+# in the above sentence "i went to withdraw money from the bank": "money" = high attention whereas "to" = low attention to understand the context of "bank"
+
+# self = based on the same input sentence (Q, K and V come from the same source sentence)
+# cross = attend to info coming from somewhere else (Q, K and V might come from a different source sentence)
+# causal = only attend to itself & previous tokens, not future tokens. 
+
+# For each token, create 3 vectors: Query (Q), Key (K), Value (V)
+# Q = What am I looking for? 
+# K = What information do i advertise? 
+# V = What information do i actually contain? 
+
+# Conceptually: 
+# Q = XW_Q
+# K = XW_K
+# V = XW_V
+
+# X only captures the token meaning + position meaning for each token individually. 
+# We need an additional feature to tune what should each token ask for, what it should advertise and what info it should actually contain. 
+
+# We look at K to find the most relevant information to Q, and then use V to get the actual information weighted by the most relevant. 
+# 1. Compute dot product of Q and K for each token, to get the attention scores. (How much attention/how relevant is this token to me?)
+# Scores = QK^T
+# Q: 
+# [A, B] # query vector for token A 
+# [C, D]
+# [E, F]
+
+# K^T: (The ^T means transpose, so K^T is the transpose of K. This is necessary for the dot product to be computed.) 
+# [G, H, I]
+# [J, K, L]
+# each column is the key vector for each token in the context window. 
+
+# QK^T:
+# [AG + BH + CI, AH + BI + CJ, AI + BJ + CK]
+# [CG + DH + EI, CH + DI + EJ, CI + DJ + EK]
+# [EG + FH + IJ, EH + FI + IK, EI + FJ + IK]
+
+# 2. Causal mask: We cannot allow the model to attend to future tokens, or it "cheats", so we apply a mask. 
+# eg: can only see the previous tokens, future tokens are masked out. 
+# i <?>
+# i went <?>
+# i went to <?> 
+
+# How do we implement this masking? 
+# By replacing tokens it should not see with -∞ and then applying softmax to get the masked (causal) attention scores. 
+
+# Scores before masking: QK^T 
+# Scores after masking:  
+# Before masking, our scores are:
+#          key 0   key 1   key 2
+# for token 0:   [ A,     B,     C ]   ← query = token 0 and each column value is how much it attends to each other token. 
+# for token 1:   [ D,     E,     F ]   ← query = token 1
+# for token 2:   [ G,     H,     I ]   ← query = token 2
+
+# We apply this mask:
+# [A, -∞, -∞] # since token 0 should not attend to future tokens (ie, 1 and 2), their query x key values are replaced with -∞.
+# [D, E, -∞]
+# [G, H, I]
+
+# 3. Softmax: Just a useful mathematical function that converts numbers into probabilities, 
+# where larger scores get even bigger weight and smaller scores get even smaller weight (it is not linear normalization). 
+# Given a masked scoring: 
+# [1, 2, -∞]
+# Softmax converts to: [0.27, 0.73, 0] 
+
+# A = softmax(masked(QK^T))
+
+# Idea of softmax over linear normalization: 
+# - "If one match is substantially better, focus considerably more on it."
+# - Convenient to give -∞ a 0 probability, as it is not a valid score. 
+# but it is also possible to research with other attention normalization functions eg, Sigmoid, sparse, linear etc
+
+# 4. After computing how much attention A, we compute the actual retrieved value from V. 
+# Causal self attention output = AV
+
+# === For minGPT, I will only use a single attention head for simplicity, but it only captures 1 way to compare tokens. === 
+# implementation of a single attention head 
+embedding_dim = input_embeddings.shape[-1]
+head_size = embedding_dim
+
+# learned matrix with 4 input features (embedding dim) and 4 output features (head size)
+# Represents a matrix multiplication y = Wx + b, where W is a learnable matrix. 
+# b is the bias, which is omitted here for simplicity (many transformer models also omit this for K, Q and V). 
+query = nn.Linear(embedding_dim, head_size, bias=False)
+key = nn.Linear(embedding_dim, head_size, bias=False)
+value = nn.Linear(embedding_dim, head_size, bias=False)
+
+#                     W_Q
+#               ┌─────────────> Q
+#               │
+# X ────────────┼──── W_K ───> K
+#               │
+#               └──── W_V ───> V
+
+Q = query(input_embeddings)
+K = key(input_embeddings)
+V = value(input_embeddings)
+
+scores = Q @ K.T 
+
+# scale the scores, to prevent the scores from becoming too large or too small and skewing softmax, 
+# especially as embedding_dim increases.  
+# since softmax does "if one is considerably better, focus considerably more on it.", we want this but not to the extreme. 
+scores = scores / math.sqrt(head_size)
+
+# causal masking 
+T = input_embeddings.shape[0] # number of tokens in the sequence
+mask = torch.tril(torch.ones(T, T)) # lower triangle = 1, upper triangle = 0
+# Generated by torch.tril(torch.ones(T, T))
+# 1 0 0 0
+# 1 1 0 0
+# 1 1 1 0
+# 1 1 1 1
+
+scores = scores.masked_fill(mask == 0, float("-inf"))
+
+# softmax 
+attention_weights = F.softmax(scores, dim=-1)
+
+head_output = attention_weights @ V
+# end of single attention head 
+
+# Each head represents a different way to compare tokens. Hence, having more heads allows the model to 
+# capture multiple ways to compare tokens. 
+#                       ┌─ W_Q1, W_K1, W_V1 -> Head 1
+#                       │
+# X --------------------├─ W_Q2, W_K2, W_V2 -> Head 2
+#                       │
+#                       ├─ W_Q3, W_K3, W_V3 -> Head 3
+#                       │
+#                       └─ W_Q4, W_K4, W_V4 -> Head 4
+# the concatenated head should be the same as the input embedding dimension.
+
+# Head 1 output ─┐
+# Head 2 output ─┤
+# Head 3 output ─┼─> concatenate -> output projection
+# Head 4 output ─┘
+
+# eg, head 1 = Which words are grammatically related to me?
+# eg, head 2 = Which words help determine what I mean? 
+# ... 
+# they may each represent different questions regarding previous tokens and relationship to current token. 
+
+print('head_output: ', head_output)
