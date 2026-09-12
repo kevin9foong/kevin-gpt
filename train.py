@@ -3,12 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-input = 'hello world'
+text = 'hello world'
 
 # === Tokenizaton, creating a vocabulary space === 
 
 # use simple character tokenization to get the vocabulary space
-chars = sorted(list(set(input)))
+chars = sorted(list(set(text)))
 
 print('chars: ', chars)
 
@@ -32,13 +32,13 @@ def encode(s):
 def decode(l):
     return ''.join([itos[i] for i in l])
 
-# test tokenization 
-print('encode: ', encode(input))
-print('decode: ', decode(encode(input)))
+# test tokenization
+print('encode: ', encode(text))
+print('decode: ', decode(encode(text)))
 
 # === Token embedding, giving each token a vector representation === 
 
-# Token embedding table, gives each token a vector representation to capture nearby tokens. 
+# Token embedding table, gives each token a vector representation to capture the semantic meaning of the token itself. 
 vocab_size = len(chars)
 
 embedding_dim = 4 # we use 4 to keep it simple, in practice, the dimensions are much larger. 
@@ -54,7 +54,7 @@ token_embeddings = nn.Embedding(
 print('token_embeddings: ', token_embeddings)
 
 # Get embeddings for all tokens in the input sequence
-token_ids = torch.tensor(encode(input), dtype=torch.long)
+token_ids = torch.tensor(encode(text), dtype=torch.long)
 
 # we can get the embedding for a token by passing the token id to the embedding table. 
 input_token_embeddings = token_embeddings(token_ids)
@@ -71,7 +71,7 @@ print('input_token_embeddings: ', input_token_embeddings) # prints out the embed
 #  ↓
 # Embedding matrix
 #  ↓
-# X = input_token_embeddings = [embedding_dim, sequence_length]
+# X = input_token_embeddings = [sequence_length, embedding_dim]
 
 # Next: 
 # X
@@ -91,7 +91,7 @@ print('input_token_embeddings: ', input_token_embeddings) # prints out the embed
 
 context_len = 32 # this is our full context window, which is the maximum number of tokens that the model can see at once. 
 
-position_embeddings = nn.Embedding(
+position_embeddings_table = nn.Embedding(
     num_embeddings=context_len,
     embedding_dim=embedding_dim # same dimension as the token embeddings, so we can add them together. usually same as token embeddings for standard GPT. 
 ) # Another random initialized matrix, which will be trained via backpropagation. 
@@ -103,7 +103,7 @@ num_tokens = len(token_ids)
 # basically, we assign each token a position id. 
 position_ids = torch.arange(num_tokens, dtype=torch.long) # generates [0, 1, 2, ..., num_tokens-1]
 
-position_embeddings = position_embeddings(position_ids)
+position_embeddings = position_embeddings_table(position_ids)
 
 input_embeddings = input_token_embeddings + position_embeddings # =X where each row captures the token meaning + position meaning for each token individually.  
 
@@ -137,8 +137,8 @@ print('input_embeddings: ', input_embeddings)
 # eg, which earlier tokens should i pay the most attention to. 
 # in the above sentence "i went to withdraw money from the bank": "money" = high attention whereas "to" = low attention to understand the context of "bank"
 
-# self = based on the same input sentence (Q, K and V come from the same source sentence)
-# cross = attend to info coming from somewhere else (Q, K and V might come from a different source sentence)
+# self = based on the same input sentence (Q, K and V come from the same source)
+# cross = attend to info coming from somewhere else (Q comes from same source, but K and V might come from a different source)
 # causal = only attend to itself & previous tokens, not future tokens. 
 
 # For each token, create 3 vectors: Query (Q), Key (K), Value (V)
@@ -158,19 +158,22 @@ print('input_embeddings: ', input_embeddings)
 # 1. Compute dot product of Q and K for each token, to get the attention scores. (How much attention/how relevant is this token to me?)
 # Scores = QK^T
 # Q: 
-# [A, B] # query vector for token A 
-# [C, D]
-# [E, F]
+# Q =
+# [A B] # query vector for token 0
+# [C D]
+# [E F]
 
 # K^T: (The ^T means transpose, so K^T is the transpose of K. This is necessary for the dot product to be computed.) 
-# [G, H, I]
-# [J, K, L]
+# K.T =
+# [G H I]
+# [J K L]
 # each column is the key vector for each token in the context window. 
 
 # QK^T:
-# [AG + BH + CI, AH + BI + CJ, AI + BJ + CK]
-# [CG + DH + EI, CH + DI + EJ, CI + DJ + EK]
-# [EG + FH + IJ, EH + FI + IK, EI + FJ + IK]
+# Q @ K.T =
+# [AG+BJ   AH+BK   AI+BL]
+# [CG+DJ   CH+DK   CI+DL]
+# [EG+FJ   EH+FK   EI+FL]
 
 # 2. Causal mask: We cannot allow the model to attend to future tokens, or it "cheats", so we apply a mask. 
 # eg: can only see the previous tokens, future tokens are masked out. 
@@ -257,6 +260,7 @@ attention_weights = F.softmax(scores, dim=-1)
 head_output = attention_weights @ V
 # end of single attention head 
 
+# Having multiple heads: 
 # Each head represents a different way to compare tokens. Hence, having more heads allows the model to 
 # capture multiple ways to compare tokens. 
 #                       ┌─ W_Q1, W_K1, W_V1 -> Head 1
@@ -279,3 +283,73 @@ head_output = attention_weights @ V
 # they may each represent different questions regarding previous tokens and relationship to current token. 
 
 print('head_output: ', head_output)
+
+# Run several heads in parallel -> concatenate -> linear projection -> multi head output 
+
+class Head(nn.Module): 
+    def __init__(self, embedding_dim, head_size):
+        super().__init__()
+
+        # define its own learnable matrices W_Q, W_K, W_V, so that it can represent a different way to compare tokens. 
+        self.query = nn.Linear(embedding_dim, head_size, bias=False)
+        self.key = nn.Linear(embedding_dim, head_size, bias=False)
+        self.value = nn.Linear(embedding_dim, head_size, bias=False)
+
+    def forward(self, x):
+        sequence_length, embedding_dim = x.shape
+
+        Q = self.query(x)
+        K = self.key(x)
+        V = self.value(x)
+
+        head_size = K.shape[-1]
+
+        scores = Q @ K.T
+        # soften the scores so that softmax does not explode or vanish for large embedding_dim. 
+        scores = scores / math.sqrt(head_size)
+
+        mask = torch.tril(torch.ones(sequence_length, sequence_length))
+        scores = scores.masked_fill(mask == 0, float("-inf"))
+
+        attention_weights = F.softmax(scores, dim=-1)
+
+        head_output = attention_weights @ V
+
+        return head_output 
+
+class MultiHeadAttention(nn.Module): 
+    def __init__(self, embedding_dim, num_heads): 
+        super().__init__()
+
+        assert embedding_dim % num_heads == 0
+        head_size = embedding_dim // num_heads
+
+        # Register a list of neural-network modules in the module, that must be trained. 
+        self.heads = nn.ModuleList([
+            Head(embedding_dim, head_size) for _ in range(num_heads) # Each head has its independent weights,
+            # which represents a different way of comparing tokens. 
+        ])
+        self.projection = nn.Linear(embedding_dim, embedding_dim)
+
+    def forward(self, x): 
+        # suppose the X embedding dim = 8 and there are 4 heads, each head will output 2 dimensions. 
+        head_outputs = [head(x) for head in self.heads] # Each head receives the same input X, 
+        # representing the individual semantic + position meaning of each sequence token. 
+
+        # then we concat all outputs of the 4 heads * 2 to get 8 dimensions per token. 
+        out = torch.cat(head_outputs, dim=-1) # Each token gets a num_heads * head_size dimension vector. 
+        # After placing the features for each token side by side, we need to mix them to form a cohesive signal. 
+        # This is done by a linear projection layer, which learns to combine the features 
+        # in a way that is useful for the downstream task. 
+        out = self.projection(out)
+
+        return out
+    
+num_heads = 4
+multi_head_attention = MultiHeadAttention(embedding_dim, num_heads)
+
+multi_head_attention_output = multi_head_attention(input_embeddings)
+
+print('multi_head_attention_output: ', multi_head_attention_output)
+print('input shape: ', input_embeddings.shape)
+print('output shape: ', multi_head_attention_output.shape)
