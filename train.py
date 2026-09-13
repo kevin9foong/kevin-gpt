@@ -41,7 +41,7 @@ x = token_ids[:-1] # remove the last token, since there is no next token to pred
 y = token_ids[1:] # what each token should predict next. 
 
 # 2. Run a forward pass to get the logits. 
-logits = model(x)
+# logits = model(x)
 
 # 3. Define the loss function
 # Correct prediction (ie high probability for right target token) = low loss 
@@ -51,5 +51,50 @@ logits = model(x)
 # so if Pcorrect is high, then the loss is low, and vice versa. 
 # We want the following: "Given the context, assign high probability to the next correct token."
 # Cross entropy measures "how much probability did we assign the the correct token answer?"
-loss = F.cross_entropy(logits, y)
+# loss = F.cross_entropy(logits, y)
 
+# 4. Backpropagate the loss to update the model parameters. 
+num_steps = 1000 
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+model.train()
+
+for step in range(num_steps): 
+    logits = model(x)
+
+    loss = F.cross_entropy(logits, y)
+
+    optimizer.zero_grad()
+
+    loss.backward()
+
+    optimizer.step()
+
+    if (step % 100 == 0):
+        print(f"step {step}: loss = {loss.item():4f}")
+     
+
+# === Prediction === 
+def predict_next_token(model, context): 
+    model.eval()
+
+    token_ids = torch.tensor(encode(context), dtype=torch.long)
+
+    with torch.no_grad():
+        logits = model(token_ids)
+
+    last_logits = logits[-1]
+
+    probabilities = F.softmax(last_logits, dim=-1)
+
+    y_hat_id = torch.argmax(probabilities).item()
+
+    return itos[y_hat_id]
+
+context = "hello"
+
+num_predictions = 10
+for prediction in range(num_predictions): 
+    next_token = predict_next_token(model, context)
+    context += next_token
+    print(next_token)
