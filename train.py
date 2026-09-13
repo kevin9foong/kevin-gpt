@@ -327,7 +327,7 @@ class MultiHeadAttention(nn.Module):
         # Register a list of neural-network modules in the module, that must be trained. 
         self.heads = nn.ModuleList([
             Head(embedding_dim, head_size) for _ in range(num_heads) # Each head has its independent weights,
-            # which represents a different way of comparing tokens. 
+            # why multiple heads? Each head captures a different way of comparing tokens. 
         ])
         self.projection = nn.Linear(embedding_dim, embedding_dim)
 
@@ -449,6 +449,7 @@ class TransformerBlock(nn.Module):
         # 2. x represents the model's shared running state, we are applying updates considering other tokens from each multi-head attention transformer block. 
         x = x + self.multi_head_attention(self.ln1(x))
 
+        # Each token converts its gathered / communicated information into a new useful representation 
         x = x + self.ffn(self.ln2(x))
     
         return x
@@ -458,3 +459,67 @@ transformer_block = TransformerBlock(embedding_dim, num_heads)
 transformer_block_output = transformer_block(input_embeddings)
 
 print('transformer_block_output: ', transformer_block_output)
+
+# === Stacking transformer blocks to form a transformer encoder === 
+# Why? 
+# Each block lets tokens communicate + process their representation using the communicated information. 
+# We might need multiple layers of refinement to fully capture complex language. (Each subsequent block builds on the previous block's output)
+#  Block 1:
+# basic contextual relationships
+
+# Block 2:
+# relationships based on what Block 1 discovered
+
+# Block 3:
+# even richer relationships
+
+# Block 4:
+# further refinement
+
+class MinGPT(nn.Module): 
+    def __init__(self, vocab_size, embedding_dim, context_len, num_heads, num_layers): 
+        super().__init__()
+
+        self.token_embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.position_embedding = nn.Embedding(context_len, embedding_dim)
+
+        # Transformer stack 
+        self.transformer_blocks = nn.Sequential(*[TransformerBlock(embedding_dim, num_heads) for _ in range(num_layers)])
+
+        # Layer norm 
+        self.final_ln = nn.LayerNorm(embedding_dim)
+
+        # Convert hidden representation into the actual next token probabilities. 
+        # the embedding dim is an internal dimension, we need to project it out to actual vocab size. 
+        self.lm_head = nn.Linear(embedding_dim, vocab_size) 
+
+    def forward(self, token_ids): 
+        T = token_ids.shape[0] # sequence length
+
+        position_ids = torch.arange(T, device=token_ids.device) # run on GPU 
+
+        token_embeddings = self.token_embedding(token_ids)
+        position_embeddings = self.position_embedding(position_ids)
+
+        X = token_embeddings + position_embeddings
+        # compute attention via the transfomrmer block, which also captures the residual 
+        X = self.transformer_blocks(X)
+
+        # Final layer norm 
+        # Why? After multiple transformer blocks, the values might become too large or small, 
+        # we apply layer norm to bring the values back to a reasonable range. 
+        X = self.final_ln(X)
+
+        # Convert hidden representation into the actual next token scores. 
+        # Note that these are not probabilities yet, just raw model scores.  
+        # will be passed to eg, softmax, sigmoid to compute the actual probabilities. 
+        logits = self.lm_head(X)
+
+        return logits 
+
+model = MinGPT(vocab_size=vocab_size, embedding_dim=4, context_len=32, num_heads=2, num_layers=4)
+
+logits = model(token_ids)
+
+print('logits: ', logits)
+print('logits shape: ', logits.shape) # shape: [sequence_length, vocab_size]
