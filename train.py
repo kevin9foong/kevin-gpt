@@ -346,10 +346,115 @@ class MultiHeadAttention(nn.Module):
         return out
     
 num_heads = 4
-multi_head_attention = MultiHeadAttention(embedding_dim, num_heads)
+# multi_head_attention = MultiHeadAttention(embedding_dim, num_heads)
 
-multi_head_attention_output = multi_head_attention(input_embeddings)
+# === Layer normalization === 
+# ln1 = nn.LayerNorm(embedding_dim)
+# multi_head_attention_output = multi_head_attention(ln1(input_embeddings))
 
-print('multi_head_attention_output: ', multi_head_attention_output)
-print('input shape: ', input_embeddings.shape)
-print('output shape: ', multi_head_attention_output.shape)
+# print('multi_head_attention_output: ', multi_head_attention_output)
+# print('input shape: ', input_embeddings.shape)
+# print('output shape: ', multi_head_attention_output.shape)
+
+# === Residual connection === 
+# Why do we not just replace X with the multi_head_attention_output?
+# We use a residual connection:
+#
+#     y = x + F(x)
+#
+# where:
+#   x    = the current token representations entering this sub-layer
+#   F(x) = the transformation performed by the sub-layer
+#          e.g. multi-head attention (usually applied to LayerNorm(x))
+
+# 1. To avoid the vanishing gradient problem, adding the original input_embeddings allows the signal from the loss to
+# reach the earliest semantic and positional embeddings during backpropagation. 
+#
+# Since:
+#
+#     y = x + F(x)
+#
+# the derivative contains an identity term:
+#
+#     dy/dx = I + dF/dx
+#
+# The identity term I provides a direct path for gradients during
+# backpropagation, instead of forcing the gradient to pass entirely
+# through F(x).
+#
+# In a simplified scalar example, if F'(x) = 0.1:
+#
+#     without residual: dy/dx = 0.1
+#     with residual:    dy/dx = 1 + 0.1 = 1.1
+#
+# This illustrates why residual connections reduce the tendency for
+# gradients to vanish across many layers.
+
+# 2. The attention is only meant to add additional contextual information (considering earlier tokens), not completely replace the original representation. 
+# X = input_embeddings + multi_head_attention_output
+
+class TransformerBlock(nn.Module): 
+    def __init__(self, embedding_dim, num_heads): 
+        super().__init__()
+        
+        # Why LayerNorm? 
+        # Goal: Normalizes the mean and variance of the input to improve training stability. 
+        # For example, given 2 input tokens. [1, 2] and [200, 400].
+        # The larger values dominate the linear layers and attention, masking the smaller ones. 
+        #
+        # LayerNorm learns 1 scale and offset for each embedding dimension (shared across all tokens), this is learned to provide the most useful output. 
+        # While it sacrifices the information about the absolute mean and scale of the tokens, 
+        # this is mitigated by the trained weights, which are tuned to such that it optimizes 
+        # to learn which scales / offsets lead to useful output for each embedding dimension. 
+
+        self.ln1 = nn.LayerNorm(embedding_dim)
+        self.ln2 = nn.LayerNorm(embedding_dim)
+
+        self.multi_head_attention = MultiHeadAttention(embedding_dim, num_heads)
+        # === Feed forward network === 
+        # After the tokens have talked to other tokens, we need each token to process the gathered information independently. 
+        # hence, we use a Multi-layer perceptron (MLP) neural network
+        # this FFN does not mix connections again, each token processes its own gathered information. 
+        self.ffn = nn.Sequential(
+            nn.Linear(embedding_dim, 4 * embedding_dim), # 4x ratio = larger hidden space for more expressiveness. 
+            # Why do we need non linear activation function? (activation: +ve neuron is active, -ve neuron is inactive)
+            # Without it, we stack (append) linear layers, which is equivalent to a single linear layer. There are limits to expressiveness with just linear layers. 
+            # With non-linear activation function, we can add more expressiveness, allowing the model to better represent the data. 
+            nn.GELU(), # Non-linear activation function 
+            # GELU > ReLU since: 
+            # 1. ReLU removes all the negative values (Which might remove useful information ie,  a slightly negative value might still contain useful information)
+            # 2. GELU: positive: increasingly retained, small negative: partially retained, large negative: close to 0.  
+            nn.Linear(4 * embedding_dim, embedding_dim)
+        )
+    
+    def forward(self, x):
+        # Post norm: 
+        #         x
+        # ├──────────────┐
+        # │              │
+        # └-> F(x) ------+
+        #                ↓
+        #               Add
+        #                ↓
+        #            LayerNorm
+        # Pre norm: 
+        # x
+        # ├───────────────────────────┐
+        # │                           │
+        # └-> LayerNorm -> F(x) ------+
+        #                             ↓
+        #                          new x
+        # LayerNorm is not applied to the residual (we apply pre-norm instead of post-norm), since: 
+        # 1. It keeps the x residual, preventing the vanishing gradient problem.
+        # 2. x represents the model's shared running state, we are applying updates considering other tokens from each multi-head attention transformer block. 
+        x = x + self.multi_head_attention(self.ln1(x))
+
+        x = x + self.ffn(self.ln2(x))
+    
+        return x
+    
+transformer_block = TransformerBlock(embedding_dim, num_heads)
+
+transformer_block_output = transformer_block(input_embeddings)
+
+print('transformer_block_output: ', transformer_block_output)
