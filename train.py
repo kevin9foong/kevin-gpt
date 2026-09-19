@@ -3,6 +3,7 @@ import torch.nn.functional as F
 
 from model import MinGPT
 
+MODEL_WEIGHTS_PATH = "model_weights.pt"
 # === Scaffold the model === 
 text = "The Shima Peninsula is home to japan's most sacred Shinto shrines, the Ise Shrines."
 
@@ -26,6 +27,8 @@ model = MinGPT(
     num_heads=4, 
     num_layers=4
 )
+
+model.load_state_dict(torch.load(MODEL_WEIGHTS_PATH))
 
 token_ids = torch.tensor(encode(text), dtype=torch.long)
 
@@ -73,7 +76,7 @@ y = token_ids[1:] # what each token should predict next.
 
 # 4. Backpropagate the loss to update the model parameters. 
 # we are fitting the model to the data by updating the model parameters. 
-num_steps = 1000 
+num_steps = 0 
 
 # first arg: tells the optimizer which parameters to update. it will not update others. 
 # second arg: learning rate (how much to update the weights by for each step)
@@ -88,7 +91,7 @@ num_steps = 1000
 # there are different optimizers which are used to decide how to update weights according to the gradients. 
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
-model.train()
+model.train() # put model into training mode, does not actually run a step. 
 
 for step in range(num_steps): 
     # without torch.no_grad, it remembers how everything was computed across the layers to allow for differentiation. 
@@ -140,7 +143,13 @@ for step in range(num_steps):
 
     if (step % 100 == 0):
         print(f"step {step}: loss = {loss.item():4f}")
+
+# state dict = dictionary/map containing all learned parameters. 
+torch.save(model.state_dict(), MODEL_WEIGHTS_PATH) # save model weights in a specified file in .pt format. 
      
+# see the current learned weights 
+# for name, value in model.state_dict().items():
+#     print(f"{name}: {value.shape}")
 
 # === Prediction === 
 def predict_next_token(model, context): 
@@ -168,3 +177,10 @@ for prediction in range(num_predictions):
     next_token = predict_next_token(model, context)
     context += next_token
     print(next_token)
+
+# Checkpointing: snapshot our training state so we can continue further training from where we left off. 
+# Stuff to save: 
+# 1. Model weights - what model has learned. 
+# 2. Optimizer state - optimizer's running history eg, AdamW can better choose how to update future weights based on past steps/gradients. 
+# 3. Model configuration - model architecture, so we can reconstruct the same model. 
+# 4. Tokenizer mappings - so that the token IDs mean the same thing across runs. 
