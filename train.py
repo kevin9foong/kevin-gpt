@@ -4,9 +4,9 @@ import torch.nn.functional as F
 from model import MinGPT
 
 # === Scaffold the model === 
-text = "hello world"
+text = "The Shima Peninsula is home to japan's most sacred Shinto shrines, the Ise Shrines."
 
-chars = sorted(list(set(text)))
+chars = sorted(list(set(text))) # extracts unique characters from the text
 
 itos = { i:ch for i, ch in enumerate(chars) }
 stoi = { ch:i for i, ch in enumerate(chars) }
@@ -21,9 +21,9 @@ vocab_size = len(chars)
 
 model = MinGPT(
     vocab_size=vocab_size, 
-    embedding_dim=4, 
-    context_len=32, 
-    num_heads=2, 
+    embedding_dim=256, 
+    context_len=128, 
+    num_heads=4, 
     num_layers=4
 )
 
@@ -40,6 +40,24 @@ token_ids = torch.tensor(encode(text), dtype=torch.long)
 x = token_ids[:-1] # remove the last token, since there is no next token to predict. 
 y = token_ids[1:] # what each token should predict next. 
 
+# example: 
+# original text:
+# h e l l o   w o r l d
+
+# x:
+# h e l l o   w o r l
+# with causal attention masks, where we override the attention with -inf, 
+# future tokens are effectively ignored (low attention scores).
+# position 0: h
+# position 1: h e
+# position 2: h e l
+# position 3: h e l l
+
+# y:
+# e l l o   w o r l d
+
+# model receives x and predicts y^ against ground truth y 
+
 # 2. Run a forward pass to get the logits. 
 # logits = model(x)
 
@@ -54,21 +72,71 @@ y = token_ids[1:] # what each token should predict next.
 # loss = F.cross_entropy(logits, y)
 
 # 4. Backpropagate the loss to update the model parameters. 
+# we are fitting the model to the data by updating the model parameters. 
 num_steps = 1000 
+
+# first arg: tells the optimizer which parameters to update. it will not update others. 
+# second arg: learning rate (how much to update the weights by for each step)
+
+# Basic gradient descent optimizer: 
+# Wnew = Wold - learning rate * gradient of the loss with respect to the weights. 
+# AdamW (adaptive moment estimation with weight decay) optimizer: 
+# "Gradient right now is +2,
+# but I've also observed the recent history
+# of gradients and their magnitudes,
+# so I'll choose a more appropriate update using some math."
+# there are different optimizers which are used to decide how to update weights according to the gradients. 
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
 model.train()
 
 for step in range(num_steps): 
-    logits = model(x)
+    # without torch.no_grad, it remembers how everything was computed across the layers to allow for differentiation. 
+    logits = model(x) # forward pass to get logits 
 
-    loss = F.cross_entropy(logits, y)
+    loss = F.cross_entropy(logits, y) #  higher loss, more updates to params. 
 
-    optimizer.zero_grad()
+    optimizer.zero_grad() # clear the computed gradient from the previous step, instead of accumulating them (which is useful for other use cases). 
 
-    loss.backward()
+    loss.backward() # computes the gradient of the loss with respect to the model parameters. 
+    # Understanding why backward: since it updates from the last layer to the first layer. 
+    
+    # Imagine a tiny network:
+    # w -> a -> b -> L, w is the only parameter we are updating, a and b are intermediate values (activations) produced by later layers during forward pass. 
 
-    optimizer.step()
+    # a = f(w)
+    # b = g(a)
+    # L = h(b)
+
+    # to update w, we need to compute dL/dw. 
+    # dL/dw = dL/db * db/da * da/dw (using the chain rule)
+
+    # so we compute from the back: 
+    # dL/db, backmost layer 
+    # dL/da = dL/db * db/da
+    # dL/dw = dL/da * da/dw, frontmost layer (we get our required gradient)
+    
+    # How we use the dL/dw gradient to update w: 
+    # Loss
+    # ^
+    # | *
+    # |  *
+    # |   *
+    # |    *
+    # |      *
+    # |        *
+    # |           *  minimum
+    # +------------------------> w
+    #     1             3
+    # we compute dL/dw, if the gradient is negative, we should increase w to reduce the loss. hence, we update w accordingly. 
+
+
+    # after we get the gradient, we need to update the weights 
+    # we dont want to over-update the weights (too large learning rate/step size), since it will cause oscillations. 
+    # too small: convergence takes too many steps.
+    # example of a simple optimizer step, not adamW: 
+    # Wnew = Wold - learning rate * gradient of the loss with respect to the weights. 
+    optimizer.step() # we do this update for num_steps times. 
 
     if (step % 100 == 0):
         print(f"step {step}: loss = {loss.item():4f}")
@@ -80,7 +148,9 @@ def predict_next_token(model, context):
 
     token_ids = torch.tensor(encode(context), dtype=torch.long)
 
-    with torch.no_grad():
+    # this disables gradient computation and its memory usage for graph, 
+    # since this is not a training step.
+    with torch.no_grad(): 
         logits = model(token_ids)
 
     last_logits = logits[-1]
@@ -91,7 +161,7 @@ def predict_next_token(model, context):
 
     return itos[y_hat_id]
 
-context = "hello"
+context = "japan"
 
 num_predictions = 10
 for prediction in range(num_predictions): 

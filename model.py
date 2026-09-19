@@ -252,7 +252,7 @@ import math
 # # 1 1 1 0
 # # 1 1 1 1
 
-# scores = scores.masked_fill(mask == 0, float("-inf"))
+# scores = scores.masked_fill(mask == 0, float("-inf")) # do not pay attention to future tokens. 
 
 # # softmax 
 # attention_weights = F.softmax(scores, dim=-1)
